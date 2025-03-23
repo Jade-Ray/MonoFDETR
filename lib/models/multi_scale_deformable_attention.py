@@ -16,7 +16,7 @@ from transformers.utils import (
 from transformers.models.deformable_detr.load_custom import load_cuda_kernels
 from transformers.utils.import_utils import _is_package_available
 
-from .configuration_mono3dvg_v2 import Mono3DVGv2Config
+from .configuration_monodetr import MonoDETRConfig
 
 logger = logging.get_logger(__name__)
 
@@ -127,7 +127,7 @@ class MSDeformAttn(nn.Module):
     Multiscale deformable attention as proposed in Deformable DETR.
     """
 
-    def __init__(self, config: Mono3DVGv2Config, num_heads: int, n_points: int):
+    def __init__(self, config: MonoDETRConfig, num_heads: int, n_points: int):
         super().__init__()
         if config.d_model % num_heads != 0:
             raise ValueError(

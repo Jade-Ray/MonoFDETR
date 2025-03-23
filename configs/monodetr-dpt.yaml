@@ -52,7 +52,7 @@ lr_scheduler:
   # min_decay_rate: 0.01
 
 # Training
-output_dir: outputs/monodetr-dpt
+output_dir: outputs/monodetr-dpt-herr
 num_train_epochs: 120
 dataloader_num_workers: 0
 train_batch_size: &batch_size 10
@@ -60,5 +60,5 @@ valid_batch_size: *batch_size
 test_batch_size: *batch_size
 freeze_encoder: False
 # monodetr_model: 'pretrained-models/monodetr/checkpoint_best.pth'
-pretrain_model: 'outputs/monodetr-dpt/checkpoints/best'
+pretrain_model: 'outputs/monodetr-dpt-herr/checkpoints/best'
 # resume_from_checkpoint: 'outputs/monodetr-dpt/checkpoints/latest'
