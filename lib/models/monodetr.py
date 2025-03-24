@@ -1183,7 +1183,7 @@ class MonoDETRForMultiObjectDetection(MonoDETRPreTrainedModel):
         self.angle_embed = MLP(config.d_model, config.d_model, 24, 2)
         self.depth_embed = MLP(config.d_model, config.d_model, 2, 2)  # depth and deviation
         
-        self.height_2d_err_embed = MLP(config.d_model, config.d_model, 1, 2) # object real 2D height
+        # self.height_2d_err_embed = MLP(config.d_model, config.d_model, 1, 2) # object real 2D height
         
         # if two-stage, the last class_embed and bbox_embed is for region proposal generation
         num_pred = config.decoder_layers
@@ -1197,7 +1197,7 @@ class MonoDETRForMultiObjectDetection(MonoDETRPreTrainedModel):
             self.model.decoder.dim_embed = self.dim_embed_3d
             self.angle_embed = _get_clones(self.angle_embed, num_pred)
             self.depth_embed = _get_clones(self.depth_embed, num_pred)
-            self.height_2d_err_embed = _get_clones(self.height_2d_err_embed, num_pred)
+            # self.height_2d_err_embed = _get_clones(self.height_2d_err_embed, num_pred)
         else:
             nn.init.constant_(self.bbox_embed.layers[-1].bias.data[2:], -2.0)
             self.class_embed = nn.ModuleList([self.class_embed for _ in range(num_pred)])
@@ -1211,14 +1211,14 @@ class MonoDETRForMultiObjectDetection(MonoDETRPreTrainedModel):
         self.post_init()
     
     @torch.jit.unused
-    def _set_aux_loss(self, outputs_class, outputs_coord, outputs_3d_dim, outputs_angle, outputs_depth, outputs_height_2d):
+    def _set_aux_loss(self, outputs_class, outputs_coord, outputs_3d_dim, outputs_angle, outputs_depth):
         # this is a workaround to make torchscript happy, as torchscript
         # doesn't support dictionary with non-homogeneous values, such
         # as a dict having both a Tensor and a list.
         return [{'logits': a, 'pred_boxes': b, 
-                 'pred_3d_dim': c, 'pred_angle': d, 'pred_depth': e, 'pred_boxes_2d_height': f}
-                for a, b, c, d, e, f in zip(outputs_class[:-1], outputs_coord[:-1],
-                                         outputs_3d_dim[:-1], outputs_angle[:-1], outputs_depth[:-1], outputs_height_2d[:-1])]
+                 'pred_3d_dim': c, 'pred_angle': d, 'pred_depth': e}
+                for a, b, c, d, e in zip(outputs_class[:-1], outputs_coord[:-1],
+                                         outputs_3d_dim[:-1], outputs_angle[:-1], outputs_depth[:-1])]
         
     def forward(
         self,
@@ -1270,7 +1270,7 @@ class MonoDETRForMultiObjectDetection(MonoDETRPreTrainedModel):
         outputs_depths = []
         # outputs_depths_map = []
         outputs_angles = []
-        outputs_heights_2d = []
+        # outputs_heights_2d = []
         
         for level in range(hidden_states.shape[1]):
             if level == 0:
@@ -1292,10 +1292,10 @@ class MonoDETRForMultiObjectDetection(MonoDETRPreTrainedModel):
             outputs_coords.append(outputs_coord)
             
             # 2d box height
-            box2d_height = (outputs_coord_logits[..., 4] + outputs_coord_logits[..., 5]).detach()
-            box2d_height_erro = self.height_2d_err_embed[level](hidden_states[:, level]).squeeze(-1)
-            box2d_height_norm = (box2d_height + box2d_height_erro).sigmoid()
-            outputs_heights_2d.append(box2d_height_norm)
+            # box2d_height = (outputs_coord_logits[..., 4] + outputs_coord_logits[..., 5]).detach()
+            # box2d_height_erro = self.height_2d_err_embed[level](hidden_states[:, level]).squeeze(-1)
+            # box2d_height_norm = (box2d_height + box2d_height_erro).sigmoid()
+            # outputs_heights_2d.append(box2d_height_norm)
 
             # classes
             outputs_class = self.class_embed[level](hidden_states[:, level])
@@ -1311,7 +1311,7 @@ class MonoDETRForMultiObjectDetection(MonoDETRPreTrainedModel):
             
             # Mix depth_geo from height and width
             # depth_geo_height => H / H' * fy = Z
-            # box2d_height_norm = outputs_coord[:, :, 4] + outputs_coord[:, :, 5]
+            box2d_height_norm = outputs_coord[:, :, 4] + outputs_coord[:, :, 5]
             box2d_height = torch.clamp(box2d_height_norm * img_sizes[:, 1: 2], min=1.0)
             depth_geo_height = size3d[:, :, 0] / box2d_height * calibs[:, 1, 1].unsqueeze(1)
             # depth_geo_width => (cos(ry) * W + cos(ry') * L) / W' * fx = Z
@@ -1363,7 +1363,7 @@ class MonoDETRForMultiObjectDetection(MonoDETRPreTrainedModel):
         outputs_depth = torch.stack(outputs_depths)
         # outputs_depth_map = torch.stack(outputs_depths_map)
         outputs_angle = torch.stack(outputs_angles)
-        outputs_height_2d = torch.stack(outputs_heights_2d)
+        # outputs_height_2d = torch.stack(outputs_heights_2d)
         
         logits = outputs_class[-1]
         pred_boxes = outputs_coord[-1]
@@ -1371,7 +1371,7 @@ class MonoDETRForMultiObjectDetection(MonoDETRPreTrainedModel):
         pred_depth = outputs_depth[-1]
         # pred_depth_map = outputs_depth_map[-1]
         pred_angle = outputs_angle[-1]
-        pred_output_height_2d = outputs_height_2d[-1]
+        # pred_output_height_2d = outputs_height_2d[-1]
 
         loss, loss_dict, auxiliary_outputs = None, None, None
         if labels is not None:
@@ -1398,10 +1398,10 @@ class MonoDETRForMultiObjectDetection(MonoDETRPreTrainedModel):
             outputs_loss['pred_depth'] = pred_depth
             outputs_loss['pred_angle'] = pred_angle
             outputs_loss['pred_depth_map_logits'] = pred_depth_map_logits
-            outputs_loss['pred_boxes_2d_height'] = pred_output_height_2d
+            # outputs_loss['pred_boxes_2d_height'] = pred_output_height_2d
             # outputs_loss['pred_depth_map'] = pred_depth_map
             if self.config.auxiliary_loss:
-                auxiliary_outputs = self._set_aux_loss(outputs_class, outputs_coord, outputs_3d_dim, outputs_angle, outputs_depth, outputs_height_2d)
+                auxiliary_outputs = self._set_aux_loss(outputs_class, outputs_coord, outputs_3d_dim, outputs_angle, outputs_depth)
                 outputs_loss["auxiliary_outputs"] = auxiliary_outputs
                 
             loss_dict = criterion(outputs_loss, labels)
@@ -1663,8 +1663,8 @@ class MonoDETRLoss(nn.Module):
         idx = self._get_source_permutation_idx(indices)
         source_boxes3d = outputs['pred_boxes'][idx]
         target_boxes3d = torch.cat([t['boxes_3d'][i] for t, (_, i) in zip(targets, indices)], dim=0)
-        source_boxes2d_height = outputs['pred_boxes_2d_height'][idx]
-        target_boxes2d_height = torch.cat([t['boxes_2d_h'][i] for t, (_, i) in zip(targets, indices)], dim=0).squeeze(-1)
+        # source_boxes2d_height = outputs['pred_boxes_2d_height'][idx]
+        # target_boxes2d_height = torch.cat([t['boxes_2d_h'][i] for t, (_, i) in zip(targets, indices)], dim=0).squeeze(-1)
 
         loss_bbox = nn.functional.l1_loss(source_boxes3d[..., 2:], target_boxes3d[..., 2:], reduction="none")
 
@@ -1676,8 +1676,8 @@ class MonoDETRLoss(nn.Module):
         )
         losses['loss_giou'] = loss_giou.sum() / num_boxes
         
-        loss_height = nn.functional.l1_loss(source_boxes2d_height, target_boxes2d_height, reduction="none")
-        losses["loss_height"] = loss_height.sum() / num_boxes
+        # loss_height = nn.functional.l1_loss(source_boxes2d_height, target_boxes2d_height, reduction="none")
+        # losses["loss_height"] = loss_height.sum() / num_boxes
         
         return losses
 
