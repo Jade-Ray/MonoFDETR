@@ -142,9 +142,11 @@ class DPTDepthPredictor(nn.Module):
         seg_pred_list = []
         for _ in range(n_levels):
             seg_pred_list.append(
-                nn.Conv2d(d_model, 256, kernel_size=3, padding=1),
-                nn.ReLU(),
-                nn.Conv2d(256, 1, kernel_size=3, padding=1),
+                nn.Sequential(
+                    nn.Conv2d(d_model, 256, kernel_size=3, padding=1),
+                    nn.ReLU(),
+                    nn.Conv2d(256, 1, kernel_size=3, padding=1),
+                )
             )
         self.seg_pred = nn.ModuleList(seg_pred_list)
         
