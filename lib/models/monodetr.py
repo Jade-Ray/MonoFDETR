@@ -930,9 +930,6 @@ class MonoDETRModel(MonoDETRPreTrainedModel):
             param.requires_grad_(False)
         for name, param in self.encoder.named_parameters():
             param.requires_grad_(False)
-        if 'marigold' not in getattr(self.config, 'depth_predictor_type', 'Default'):
-            for name, param in self.depth_predictor.named_parameters():
-                param.requires_grad_(False)
 
     def get_valid_ratio(self, mask):
         """Get the valid ratio of all feature maps."""
@@ -1229,12 +1226,6 @@ class MonoDETRForMultiObjectDetection(MonoDETRPreTrainedModel):
             # 3d center + 2d box
             outputs_coord = outputs_coord_logits.sigmoid()
             outputs_coords.append(outputs_coord)
-            
-            # 2d box height
-            # box2d_height = (outputs_coord_logits[..., 4] + outputs_coord_logits[..., 5]).detach()
-            # box2d_height_erro = self.height_2d_err_embed[level](hidden_states[:, level]).squeeze(-1)
-            # box2d_height_norm = (box2d_height + box2d_height_erro).sigmoid()
-            # outputs_heights_2d.append(box2d_height_norm)
 
             # classes
             outputs_class = self.class_embed[level](hidden_states[:, level])
@@ -1248,52 +1239,16 @@ class MonoDETRForMultiObjectDetection(MonoDETRPreTrainedModel):
             outputs_angle = self.angle_embed[level](hidden_states[:, level])
             outputs_angles.append(outputs_angle)
             
-            # Mix depth_geo from height and width
             # depth_geo_height => H / H' * fy = Z
             box2d_height_norm = outputs_coord[:, :, 4] + outputs_coord[:, :, 5]
             box2d_height = torch.clamp(box2d_height_norm * img_sizes[:, 1: 2], min=1.0)
-            depth_geo_height = size3d[:, :, 0] / box2d_height * calibs[:, 1, 1].unsqueeze(1)
-            # depth_geo_width => (cos(ry) * W + cos(ry') * L) / W' * fx = Z
-            # box2d_width_norm = outputs_coord[:, :, 2] + outputs_coord[:, :, 3]
-            # box2d_width = torch.clamp(box2d_width_norm * img_sizes[:, 0: 1], min=1.0)
-            # cx_2d_norm = box_xyxy_to_cxcywh(box_cxcylrtb_to_xyxy(outputs_coord))[..., 0]
-            # cx_2d = torch.clamp(cx_2d_norm * img_sizes[:, 0: 1], min=1.0)
-            # heading_bin, heading_res = outputs_angle.split([12, 12], dim=-1)
-            # cls_ind = torch.argmax(heading_bin, dim=-1)
-            # heading_res = torch.gather(heading_res, 2, cls_ind.unsqueeze(2)).squeeze(2)
-            # angle = (cls_ind.float() * (2 * torch.pi / 12) + heading_res)
-            # angle = torch.where(angle > torch.pi, angle - 2 * torch.pi, angle)
-            # ry = angle + torch.arctan2(cx_2d - calibs[:, 0, 2].unsqueeze(1), calibs[:, 0, 0].unsqueeze(1))
-            # ry = torch.where(ry > torch.pi, ry - 2 * torch.pi, ry)
-            # ry = torch.where(ry < -torch.pi, ry + 2 * torch.pi, ry)
-            # box_3d_width = size3d[:, :, 1]
-            # box_3d_length = size3d[:, :, 2]
-            # depth_geo_width = torch.where(ry == 0, box_3d_width, torch.where((ry==torch.pi/2)|(ry==-torch.pi/2), box_3d_length, torch.where((ry>0)&(ry<torch.pi/2), box_3d_width * torch.cos(torch.pi/2 - ry) + box_3d_length * torch.cos(ry), torch.where(ry > torch.pi/2, box_3d_width * torch.cos(ry - torch.pi/2) + box_3d_length * torch.cos(torch.pi - ry), torch.where((ry<0)&(ry>-torch.pi/2), box_3d_width * torch.cos(torch.pi/2 + ry) + box_3d_length * torch.cos(ry), box_3d_width * torch.cos(ry + torch.pi/2) + box_3d_length * torch.cos(torch.pi + ry)))))) / box2d_width * calibs[:, 0, 0].unsqueeze(1)
-            # # depth_geo => alpha * depth_geo_width + (1 - alpha) * depth_geo_height
-            # ry_alpha = torch.cos(2 * ry)
-            # ga_alpha = torch.exp(-0.5 * (torch.abs(depth_geo_height - depth_geo_width) / 0.1) ** 2)
-            # alpha = 0.5 * ry_alpha + 0.5 * ga_alpha
-            # depth_geo = alpha * depth_geo_width + (1 - alpha) * depth_geo_height
-            depth_geo = depth_geo_height
+            depth_geo = size3d[:, :, 0] / box2d_height * calibs[:, 1, 1].unsqueeze(1)
 
-            # depth_reg
-            depth_reg = self.depth_embed[level](hidden_states[:, level])
-
-            # depth_map 
-            # outputs_center3d = ((outputs_coord[..., :2] - 0.5) * 2).unsqueeze(2).detach()
-            # depth_map = F.grid_sample(
-            #     weighted_depth.unsqueeze(1),
-            #     outputs_center3d,
-            #     mode='bilinear',
-            #     align_corners=True
-            # ).squeeze(1)
-            # outputs_depths_map.append(depth_map)
+            # depth_geo_err
+            depth_geo_err = self.depth_embed[level](hidden_states[:, level])
 
             # depth average + sigma
-            # depth_ave = torch.cat([
-            #     ((1. / (depth_reg[:, :, 0: 1].sigmoid() + 1e-6) - 1.) + depth_geo.unsqueeze(-1) + depth_map) / 3, 
-            #     depth_reg[:, :, 1: 2]], -1)
-            depth_ave = torch.cat([depth_geo.unsqueeze(-1) + depth_reg[:, :, 0: 1], depth_reg[:, :, 1: 2]], -1)
+            depth_ave = torch.cat([depth_geo.unsqueeze(-1) + depth_geo_err[:, :, 0: 1], depth_geo_err[:, :, 1: 2]], -1)
             outputs_depths.append(depth_ave)
 
         outputs_coord = torch.stack(outputs_coords)
