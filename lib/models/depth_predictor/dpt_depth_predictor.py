@@ -35,6 +35,7 @@ class DPTDepthPredictorOutput(ModelOutput):
     predicted_depth: torch.FloatTensor = None
     hidden_states: List[torch.FloatTensor] = None
     weighted_depth: torch.FloatTensor = None
+    region_probs: List[torch.FloatTensor] = None
 
 
 class DepthAnything(nn.Module):
@@ -126,8 +127,9 @@ class DPTDepthPredictor(nn.Module):
                 )
             )
         self.depth_proj = nn.ModuleList(depth_proj_list)
+        n_levels = config.num_feature_levels
         depth_fusion_list = []
-        for _ in range(4):
+        for _ in range(n_levels):
             depth_fusion_list.append(
                 nn.Sequential(
                     nn.Conv2d(2 * d_model, d_model, kernel_size=1),
@@ -135,6 +137,16 @@ class DPTDepthPredictor(nn.Module):
                 )
             )
         self.depth_fusion = nn.ModuleList(depth_fusion_list)
+        
+        self.se_blocks = nn.ModuleList([SEBlock(d_model) for _ in range(n_levels)])
+        seg_pred_list = []
+        for _ in range(n_levels):
+            seg_pred_list.append(
+                nn.Conv2d(d_model, 256, kernel_size=3, padding=1),
+                nn.ReLU(),
+                nn.Conv2d(256, 1, kernel_size=3, padding=1),
+            )
+        self.seg_pred = nn.ModuleList(seg_pred_list)
         
         self.depth_head = nn.Sequential(
             nn.Conv2d(d_model, d_model, kernel_size=(3, 3), padding=1),
@@ -145,13 +157,6 @@ class DPTDepthPredictor(nn.Module):
             nn.ReLU(),
         )
         
-        # self.depth_metric = nn.Sequential(
-        #     nn.Conv2d(d_model, d_model//2, kernel_size=1),
-        #     nn.AdaptiveAvgPool2d(1),
-        #     nn.Flatten(),
-        #     nn.Linear(d_model//2, 1),
-        #     nn.Sigmoid()
-        # )
         self.depth_pos_embed = nn.Embedding(int(self.depth_max) + 1, d_model)
         
     def forward(
@@ -184,33 +189,41 @@ class DPTDepthPredictor(nn.Module):
             del outputs_random_mix, output_hidden_states_random_mix, predicted_depth_random_mix
             
         hidden_states = []
+        region_probs = []
         for i, (feature, hidden_state) in enumerate(zip(features, output_hidden_states)):
             hidden_state = hidden_state.detach()
             hidden_state = self.depth_proj[i](hidden_state)
             hidden_state = F.interpolate(hidden_state, size=feature.shape[-2:], mode='bilinear', align_corners=False)
             hidden_state = self.depth_fusion[i](torch.cat([hidden_state, feature], dim=1))
+            
+            seg_hidden_state = self.se_blocks[i](hidden_state)
+            seg_prob = torch.sigmoid(self.seg_pred[i](seg_hidden_state))
+            region_probs.append(torch.clamp(seg_prob, min=1e-5, max=1 - 1e-5))
+            # enhance multi-scale features
+            hidden_state = hidden_state * seg_prob
+            
             hidden_states.append(hidden_state)
         
         depth_embed = self.depth_head(hidden_states[1])
-        # depth_metric_offset = self.depth_metric(depth_embed) # [B, 1]
+        seg_embed = torch.where(region_probs[1] > 0.5, torch.ones_like(region_probs[1]), torch.zeros_like(region_probs[1]))
         
         # weighted relative depth to metric depth
-        # weighted_depth = self.depth_max * (predicted_depth + 2 * (depth_metric_offset[..., None] - 0.5))
         weighted_depth = self.depth_max * predicted_depth
         weighted_depth = weighted_depth.clamp(min=0, max=self.depth_max)
         depth_pos_embed_ip = self.interpolate_depth_embed(
             F.interpolate(weighted_depth.unsqueeze(1), size=depth_embed.shape[-2:], mode="bicubic", align_corners=False).squeeze(1)
         )
-        depth_embed = depth_embed + depth_pos_embed_ip
+        depth_embed = depth_embed + depth_pos_embed_ip + seg_embed
         
         if not return_dict:
-            return (depth_embed, predicted_depth, hidden_states, weighted_depth)
+            return (depth_embed, predicted_depth, hidden_states, weighted_depth, region_probs)
         
         return DPTDepthPredictorOutput(
             depth_embed=depth_embed,
             predicted_depth=predicted_depth,
             hidden_states=hidden_states,
             weighted_depth=weighted_depth,
+            region_probs=region_probs
         )
     
     def interpolate_depth_embed(self, depth):
@@ -236,3 +249,16 @@ class DPTDepthPredictor(nn.Module):
         depth_map = 1.0 - (depth_map - depth_map_min[:, None, None]) / (depth_map_max[:, None, None] - depth_map_min[:, None, None])
         return depth_map
         
+
+class SEBlock(nn.Module):
+    """Squeeeze-and-Excitation Block, a channel-wise attention mechanism. Just with Pooling (squeeze) and FC layers (excitation) to learn the weights for each channel. Enhancing the representational power of the important channels and reducing the noise of the unrelevant background."""
+    def __init__(self, channel, reduction=16):
+        super(SEBlock, self).__init__()
+        self.fc1 = nn.Conv2d(channel, channel // reduction, kernel_size=1)
+        self.fc2 = nn.Conv2d(channel // reduction, channel, kernel_size=1)
+
+    def forward(self, x):
+        w = F.adaptive_avg_pool2d(x, 1)
+        w = F.relu(self.fc1(w))
+        w = torch.sigmoid(self.fc2(w))
+        return x * w
