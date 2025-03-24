@@ -149,7 +149,7 @@ class KITTI_Dataset(Dataset):
         #  ============================   get inputs   ===========================
         img_id = int(self.idx_list[index])
         img = self._load_image(index)
-        img_size = np.array(img.size)
+        img_size = np.array(img.size) # (W, H)
         features_size = self.resolution // self.downsample    # W * H
         img_without_pd = img.copy()
         
@@ -229,14 +229,14 @@ class KITTI_Dataset(Dataset):
         src_size_3d = np.zeros((self.max_objs, 3), dtype=np.float32)
         boxes = np.zeros((self.max_objs, 4), dtype=np.float32)
         boxes_3d = np.zeros((self.max_objs, 6), dtype=np.float32)
-        boxes_2d_h = np.zeros((self.max_objs, 1), dtype=np.float32)
         corners_3d = np.zeros((self.max_objs, 8, 2), dtype=np.float32)
+        obj_region = np.zeros((img.shape[1], img.shape[2]), dtype=bool) # (H, W)
         
         object_num = len(objects) if len(objects) < self.max_objs else self.max_objs
         
-        labels, mask_2d, depth, heading_bin, heading_res, size_2d, size_3d, src_size_3d, boxes, boxes_3d, corners_3d, boxes_2d_h = self._encode_label(
+        labels, mask_2d, depth, heading_bin, heading_res, size_2d, size_3d, src_size_3d, boxes, boxes_3d, corners_3d, obj_region = self._encode_label(
             objects, calib, object_num, trans, img_size, crop_scale, random_flip_flag,
-            labels, mask_2d, depth, heading_bin, heading_res, size_2d, size_3d, src_size_3d, boxes, boxes_3d, corners_3d, boxes_2d_h)
+            labels, mask_2d, depth, heading_bin, heading_res, size_2d, size_3d, src_size_3d, boxes, boxes_3d, corners_3d, obj_region)
         
         return {
             'pixel_values': img,
@@ -247,12 +247,12 @@ class KITTI_Dataset(Dataset):
                 'labels': labels,
                 'boxes': boxes,
                 'boxes_3d': boxes_3d,
-                'boxes_2d_h': boxes_2d_h,
                 'depth': depth,
                 'size_3d': size_3d,
                 'heading_bin': heading_bin,
                 'heading_res': heading_res,
                 'mask_2d': mask_2d,
+                'obj_region': obj_region,
             },
             'info': {
                 'corners_3d': corners_3d,
@@ -328,7 +328,7 @@ class KITTI_Dataset(Dataset):
         return is_filter
 
     def _encode_label(self, objects, calib, object_num, trans, img_size, crop_scale, random_flip_flag,
-                      labels, mask_2d, depth, heading_bin, heading_res, size_2d, size_3d, src_size_3d, boxes, boxes_3d, corners_3d, boxes_2d_h):
+                      labels, mask_2d, depth, heading_bin, heading_res, size_2d, size_3d, src_size_3d, boxes, boxes_3d, corners_3d, obj_region):
         for i in range(object_num):
             if self._filter_object(objects[i]):
                 continue
@@ -339,6 +339,11 @@ class KITTI_Dataset(Dataset):
             # add affine transformation for 2d boxes.
             bbox_2d[:2] = affine_transform(bbox_2d[:2], trans)
             bbox_2d[2:] = affine_transform(bbox_2d[2:], trans)
+            
+            # create object region
+            ymin, ymax = int(max(bbox_2d[1], 0)), int(min(bbox_2d[3], img_size[1]))
+            xmin, xmax = int(max(bbox_2d[0], 0)), int(min(bbox_2d[2], img_size[0]))
+            obj_region[ymin:ymax, xmin:xmax] = 1
 
             # process 3d center
             center_2d = np.array([(bbox_2d[0] + bbox_2d[2]) / 2, (bbox_2d[1] + bbox_2d[3]) / 2], 
@@ -417,8 +422,5 @@ class KITTI_Dataset(Dataset):
             if random_flip_flag:
                 corners_3d[i][:, 0] = img_size[0] - corners_3d[i][:, 0]
             corners_3d[i] = np.stack([affine_transform(corner, trans) for corner in corners_3d[i]], axis=0)
-            
-            boxes_2d_height = size_3d[i][0] * calib.fu / depth[i]
-            boxes_2d_h[i] = boxes_2d_height / self.resolution[1]
         
-        return labels, mask_2d, depth, heading_bin, heading_res, size_2d, size_3d, src_size_3d, boxes, boxes_3d, corners_3d, boxes_2d_h
+        return labels, mask_2d, depth, heading_bin, heading_res, size_2d, size_3d, src_size_3d, boxes, boxes_3d, corners_3d, obj_region

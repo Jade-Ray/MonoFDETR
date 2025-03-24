@@ -129,7 +129,7 @@ class MonoDETRModelOutput(ModelOutput):
     encoder_attentions: Optional[Tuple[torch.FloatTensor]] = None
     depth_logits: Optional[torch.FloatTensor] = None
     weighted_depth: Optional[torch.FloatTensor] = None
-    extra_depth_map: Optional[torch.FloatTensor] = None
+    region_probs: Optional[List[torch.FloatTensor]] = None
 
 
 @dataclass
@@ -328,19 +328,6 @@ class MonoDETRDecoderLayer(nn.Module):
         self.cross_attn_depth_layer_norm = nn.LayerNorm(self.embed_dim)
         self.cross_attn_depth_residual = config.decoder_depth_residual
         
-        # extra fine-grained depth cross attention
-        self.extra_depth = False
-        if self.extra_depth:
-            self.cross_attn_extra_depth = DeformAttn(
-                config,
-                num_heads=config.decoder_attention_heads,
-                n_points=config.decoder_n_points,
-            )
-            self.cross_attn_extra_depth_layer_norm = nn.LayerNorm(self.embed_dim)
-            self.cross_attn_extra_depth_residual = config.decoder_depth_residual
-        else:
-            self.cross_attn_extra_depth = None
-        
         # self attention
         if config.decoder_self_attn:
             self.self_attn = nn.MultiheadAttention(self.embed_dim, config.decoder_attention_heads, dropout=config.dropout, batch_first=True)
@@ -385,10 +372,6 @@ class MonoDETRDecoderLayer(nn.Module):
         depth_embeds: Optional[Tensor] = None, # bs, H_1*W_1, d_model
         depth_attention_mask: Optional[Tensor] = None, # bs, H_1*W_1
         depth_adapt_k: Optional[Tensor] = None, # H_1*W_1, bs, d_model
-        extra_depth_embeds: Optional[Tensor] = None, # bs, h*w, d_model
-        extra_depth_attention_mask: Optional[Tensor] = None, # bs, h*w
-        extra_depth_reference_points: Optional[Tensor] = None, # bs, h*w, 1, 2
-        extra_depth_spatial_shapes: Optional[Tensor] = None, # 1, 2
         output_attentions: Optional[bool] = False,
     ):
         """
@@ -431,26 +414,6 @@ class MonoDETRDecoderLayer(nn.Module):
         hidden_states = self.cross_attn_depth_layer_norm(hidden_states)
         if self.cross_attn_depth_residual:
             residual = hidden_states
-        
-        # Extra Depth Cross Attention
-        cross_attn_extra_depth_weights = None
-        if self.cross_attn_extra_depth is not None:
-            hidden_states, cross_attn_extra_depth_weights = self.cross_attn_extra_depth(
-                hidden_states=hidden_states,
-                attention_mask=extra_depth_attention_mask,
-                encoder_hidden_states=extra_depth_embeds,
-                position_embeddings=position_embeddings,
-                reference_points=extra_depth_reference_points,
-                spatial_shapes=extra_depth_spatial_shapes,
-                level_start_index=torch.zeros(1, dtype=torch.long, device=hidden_states.device),
-                output_attentions=output_attentions,
-            )
-            hidden_states = nn.functional.dropout(hidden_states, p=self.dropout, training=self.training)
-            if self.cross_attn_extra_depth_residual:
-                hidden_states = hidden_states + residual
-            hidden_states = self.cross_attn_extra_depth_layer_norm(hidden_states)
-            if self.cross_attn_extra_depth_residual:
-                residual = hidden_states
         
         # Self-Attention
         self_attn_weights = None
@@ -746,10 +709,6 @@ class MonoDETRDecoder(MonoDETRPreTrainedModel):
         depth_embeds=None, # bs, H_1*W_1, d_model
         depth_attention_mask=None, # bs, H_1*W_1
         depth_adapt_k=None, # H_1*W_1, bs, d_model
-        extra_depth_embeds=None, # bs, h*w, d_model
-        extra_depth_attention_mask=None, # bs, h*w
-        extra_depth_valid_ratio=None, # bs, 2
-        extra_depth_spatial_shapes=None, # 1, 2
         output_attentions=None,
         output_hidden_states=None,
         return_dict=None,
@@ -818,8 +777,6 @@ class MonoDETRDecoder(MonoDETRPreTrainedModel):
                 if reference_points.shape[-1] != 2:
                     raise ValueError("Reference points' last dimension must be of size 2")
                 reference_points_input = reference_points[:, :, None] * valid_ratios[:, None] # bs, nq, 4, 2
-                if extra_depth_valid_ratio is not None:
-                    extra_reference_points_input = reference_points[:, :, None] * extra_depth_valid_ratio[:, None, None] # bs, nq, 1, 2
 
             if output_hidden_states:
                 all_hidden_states += (hidden_states,)
@@ -844,10 +801,6 @@ class MonoDETRDecoder(MonoDETRPreTrainedModel):
                     depth_embeds=depth_embeds,
                     depth_attention_mask=depth_attention_mask,
                     depth_adapt_k=depth_adapt_k,
-                    extra_depth_embeds=extra_depth_embeds,
-                    extra_depth_attention_mask=extra_depth_attention_mask,
-                    extra_depth_reference_points=extra_reference_points_input if extra_depth_valid_ratio is not None else None,
-                    extra_depth_spatial_shapes=extra_depth_spatial_shapes,
                     output_attentions=output_attentions,
                 )
                 
@@ -1060,16 +1013,10 @@ class MonoDETRModel(MonoDETRPreTrainedModel):
         depth_embeds = depth_predictor_outputs[0].flatten(2).permute(0, 2, 1) # bs, H_1*W_1, d_model
         sources = depth_predictor_outputs[2]
         weighted_depth = depth_predictor_outputs[3]
+        region_probs = depth_predictor_outputs[4]
         depth_attention_mask = masks[1].flatten(1) # bs, H_1*W_1
         depth_logits = None
         depth_adapt_k = None
-        
-        # extra_depth_embeds, extra_depth_map = self.extra_depth_predictor(pixel_values)
-        # extra_depth_mask = F.interpolate(pixel_mask[None].float(), size=extra_depth_embeds.shape[-2:]).to(torch.bool)[0]
-        # extra_depth_spatial_shape = torch.as_tensor([extra_depth_embeds.shape[-2:]], dtype=torch.long, device=extra_depth_embeds.device)
-        # extra_depth_embeds = extra_depth_embeds.flatten(2).permute(0, 2, 1) # bs, h*w, d_model
-        # extra_depth_attention_mask = extra_depth_mask.flatten(1) # bs, h*w
-        # extra_depth_valid_ratio = self.get_valid_ratio(extra_depth_mask).float() # bs, 2
         
         # Create queries
         if self.training:
@@ -1137,10 +1084,6 @@ class MonoDETRModel(MonoDETRPreTrainedModel):
             depth_embeds=depth_embeds,
             depth_attention_mask=depth_attention_mask,
             depth_adapt_k=depth_embeds if depth_adapt_k is None else depth_adapt_k,
-            # extra_depth_embeds=extra_depth_embeds,
-            # extra_depth_attention_mask=extra_depth_attention_mask,
-            # extra_depth_valid_ratio=extra_depth_valid_ratio,
-            # extra_depth_spatial_shapes=extra_depth_spatial_shape,
             output_attentions=output_attentions,
             output_hidden_states=output_hidden_states,
             return_dict=return_dict,
@@ -1148,7 +1091,7 @@ class MonoDETRModel(MonoDETRPreTrainedModel):
         
         if not return_dict:
             depth_outputs = tuple(value for value in [depth_logits, weighted_depth] if value is not None)
-            tuple_outputs = (init_reference_points,) + decoder_outputs + encoder_outputs + depth_outputs
+            tuple_outputs = (init_reference_points,) + decoder_outputs + encoder_outputs + depth_outputs + (region_probs,)
             
             return tuple_outputs
         
@@ -1165,6 +1108,7 @@ class MonoDETRModel(MonoDETRPreTrainedModel):
             encoder_attentions=encoder_outputs.attentions,
             depth_logits=depth_logits,
             weighted_depth=weighted_depth,
+            region_probs=region_probs,
         )
 
 
@@ -1183,8 +1127,6 @@ class MonoDETRForMultiObjectDetection(MonoDETRPreTrainedModel):
         self.angle_embed = MLP(config.d_model, config.d_model, 24, 2)
         self.depth_embed = MLP(config.d_model, config.d_model, 2, 2)  # depth and deviation
         
-        self.height_2d_err_embed = MLP(config.d_model, config.d_model, 1, 2) # object real 2D height
-        
         # if two-stage, the last class_embed and bbox_embed is for region proposal generation
         num_pred = config.decoder_layers
         if config.with_box_refine:
@@ -1197,7 +1139,6 @@ class MonoDETRForMultiObjectDetection(MonoDETRPreTrainedModel):
             self.model.decoder.dim_embed = self.dim_embed_3d
             self.angle_embed = _get_clones(self.angle_embed, num_pred)
             self.depth_embed = _get_clones(self.depth_embed, num_pred)
-            self.height_2d_err_embed = _get_clones(self.height_2d_err_embed, num_pred)
         else:
             nn.init.constant_(self.bbox_embed.layers[-1].bias.data[2:], -2.0)
             self.class_embed = nn.ModuleList([self.class_embed for _ in range(num_pred)])
@@ -1211,14 +1152,14 @@ class MonoDETRForMultiObjectDetection(MonoDETRPreTrainedModel):
         self.post_init()
     
     @torch.jit.unused
-    def _set_aux_loss(self, outputs_class, outputs_coord, outputs_3d_dim, outputs_angle, outputs_depth, outputs_height_2d):
+    def _set_aux_loss(self, outputs_class, outputs_coord, outputs_3d_dim, outputs_angle, outputs_depth):
         # this is a workaround to make torchscript happy, as torchscript
         # doesn't support dictionary with non-homogeneous values, such
         # as a dict having both a Tensor and a list.
         return [{'logits': a, 'pred_boxes': b, 
-                 'pred_3d_dim': c, 'pred_angle': d, 'pred_depth': e, 'pred_boxes_2d_height': f}
-                for a, b, c, d, e, f in zip(outputs_class[:-1], outputs_coord[:-1],
-                                         outputs_3d_dim[:-1], outputs_angle[:-1], outputs_depth[:-1], outputs_height_2d[:-1])]
+                 'pred_3d_dim': c, 'pred_angle': d, 'pred_depth': e}
+                for a, b, c, d, e in zip(outputs_class[:-1], outputs_coord[:-1],
+                                         outputs_3d_dim[:-1], outputs_angle[:-1], outputs_depth[:-1])]
         
     def forward(
         self,
@@ -1260,17 +1201,15 @@ class MonoDETRForMultiObjectDetection(MonoDETRPreTrainedModel):
         init_reference = outputs.init_reference_points if return_dict else outputs[0]
         inter_references = outputs.intermediate_reference_points if return_dict else outputs[3]
         inter_references_dim = outputs.intermediate_reference_dims if return_dict else outputs[4]
-        pred_depth_map_logits = outputs.depth_logits if return_dict else outputs[-2]
-        # weighted_depth = outputs.weighted_depth if return_dict else outputs[-1]
+        pred_depth_map_logits = outputs.depth_logits if return_dict else outputs[-3]
+        pred_region_probs = outputs.region_probs if return_dict else outputs[-1]
         
         # class logits + predicted bounding boxes + 3D dims + depths + angles
         outputs_classes = []
         outputs_coords = []
         outputs_3d_dims = []
         outputs_depths = []
-        # outputs_depths_map = []
         outputs_angles = []
-        outputs_heights_2d = []
         
         for level in range(hidden_states.shape[1]):
             if level == 0:
@@ -1292,10 +1231,10 @@ class MonoDETRForMultiObjectDetection(MonoDETRPreTrainedModel):
             outputs_coords.append(outputs_coord)
             
             # 2d box height
-            box2d_height = (outputs_coord_logits[..., 4] + outputs_coord_logits[..., 5]).detach()
-            box2d_height_erro = self.height_2d_err_embed[level](hidden_states[:, level]).squeeze(-1)
-            box2d_height_norm = (box2d_height + box2d_height_erro).sigmoid()
-            outputs_heights_2d.append(box2d_height_norm)
+            # box2d_height = (outputs_coord_logits[..., 4] + outputs_coord_logits[..., 5]).detach()
+            # box2d_height_erro = self.height_2d_err_embed[level](hidden_states[:, level]).squeeze(-1)
+            # box2d_height_norm = (box2d_height + box2d_height_erro).sigmoid()
+            # outputs_heights_2d.append(box2d_height_norm)
 
             # classes
             outputs_class = self.class_embed[level](hidden_states[:, level])
@@ -1311,7 +1250,7 @@ class MonoDETRForMultiObjectDetection(MonoDETRPreTrainedModel):
             
             # Mix depth_geo from height and width
             # depth_geo_height => H / H' * fy = Z
-            # box2d_height_norm = outputs_coord[:, :, 4] + outputs_coord[:, :, 5]
+            box2d_height_norm = outputs_coord[:, :, 4] + outputs_coord[:, :, 5]
             box2d_height = torch.clamp(box2d_height_norm * img_sizes[:, 1: 2], min=1.0)
             depth_geo_height = size3d[:, :, 0] / box2d_height * calibs[:, 1, 1].unsqueeze(1)
             # depth_geo_width => (cos(ry) * W + cos(ry') * L) / W' * fx = Z
@@ -1361,17 +1300,13 @@ class MonoDETRForMultiObjectDetection(MonoDETRPreTrainedModel):
         outputs_class = torch.stack(outputs_classes)
         outputs_3d_dim = torch.stack(outputs_3d_dims)
         outputs_depth = torch.stack(outputs_depths)
-        # outputs_depth_map = torch.stack(outputs_depths_map)
         outputs_angle = torch.stack(outputs_angles)
-        outputs_height_2d = torch.stack(outputs_heights_2d)
         
         logits = outputs_class[-1]
         pred_boxes = outputs_coord[-1]
         pred_3d_dim = outputs_3d_dim[-1]
         pred_depth = outputs_depth[-1]
-        # pred_depth_map = outputs_depth_map[-1]
         pred_angle = outputs_angle[-1]
-        pred_output_height_2d = outputs_height_2d[-1]
 
         loss, loss_dict, auxiliary_outputs = None, None, None
         if labels is not None:
@@ -1380,8 +1315,7 @@ class MonoDETRForMultiObjectDetection(MonoDETRPreTrainedModel):
                 class_cost=self.config.class_cost, center3d_cost=self.config.center3d_cost, bbox_cost=self.config.bbox_cost, giou_cost=self.config.giou_cost
             )
             # Second: create the criterion
-            # losses = ['labels', 'boxes', 'cardinality', 'depths', 'dims', 'angles', 'center', 'depth_map']
-            losses = ['labels', 'boxes', 'cardinality', 'depths', 'dims', 'angles', 'center']
+            losses = ['labels', 'boxes', 'cardinality', 'depths', 'dims', 'angles', 'center', 'region']
             criterion = MonoDETRLoss(
                 matcher=matcher,
                 num_classes=self.config.num_labels,
@@ -1398,10 +1332,9 @@ class MonoDETRForMultiObjectDetection(MonoDETRPreTrainedModel):
             outputs_loss['pred_depth'] = pred_depth
             outputs_loss['pred_angle'] = pred_angle
             outputs_loss['pred_depth_map_logits'] = pred_depth_map_logits
-            outputs_loss['pred_boxes_2d_height'] = pred_output_height_2d
-            # outputs_loss['pred_depth_map'] = pred_depth_map
+            outputs_loss['pred_region_prob'] = pred_region_probs
             if self.config.auxiliary_loss:
-                auxiliary_outputs = self._set_aux_loss(outputs_class, outputs_coord, outputs_3d_dim, outputs_angle, outputs_depth, outputs_height_2d)
+                auxiliary_outputs = self._set_aux_loss(outputs_class, outputs_coord, outputs_3d_dim, outputs_angle, outputs_depth)
                 outputs_loss["auxiliary_outputs"] = auxiliary_outputs
                 
             loss_dict = criterion(outputs_loss, labels)
@@ -1413,6 +1346,7 @@ class MonoDETRForMultiObjectDetection(MonoDETRPreTrainedModel):
             weight_dict['loss_depth'] = self.config.depth_loss_coefficient
             weight_dict['loss_center'] = self.config.center3d_loss_coefficient
             weight_dict['loss_depth_map'] = self.config.depth_map_loss_coefficient
+            weight_dict['loss_region'] = self.config.region_loss_coefficient
             if self.config.auxiliary_loss:
                 aux_weight_dict = {}
                 for i in range(self.config.decoder_layers - 1):
@@ -1663,8 +1597,8 @@ class MonoDETRLoss(nn.Module):
         idx = self._get_source_permutation_idx(indices)
         source_boxes3d = outputs['pred_boxes'][idx]
         target_boxes3d = torch.cat([t['boxes_3d'][i] for t, (_, i) in zip(targets, indices)], dim=0)
-        source_boxes2d_height = outputs['pred_boxes_2d_height'][idx]
-        target_boxes2d_height = torch.cat([t['boxes_2d_h'][i] for t, (_, i) in zip(targets, indices)], dim=0).squeeze(-1)
+        # source_boxes2d_height = outputs['pred_boxes_2d_height'][idx]
+        # target_boxes2d_height = torch.cat([t['boxes_2d_h'][i] for t, (_, i) in zip(targets, indices)], dim=0).squeeze(-1)
 
         loss_bbox = nn.functional.l1_loss(source_boxes3d[..., 2:], target_boxes3d[..., 2:], reduction="none")
 
@@ -1676,8 +1610,8 @@ class MonoDETRLoss(nn.Module):
         )
         losses['loss_giou'] = loss_giou.sum() / num_boxes
         
-        loss_height = nn.functional.l1_loss(source_boxes2d_height, target_boxes2d_height, reduction="none")
-        losses["loss_height"] = loss_height.sum() / num_boxes
+        # loss_height = nn.functional.l1_loss(source_boxes2d_height, target_boxes2d_height, reduction="none")
+        # losses["loss_height"] = loss_height.sum() / num_boxes
         
         return losses
 
@@ -1785,90 +1719,25 @@ uncertainty loss.
             depth_map_logits, gt_boxes2d, num_gt_per_img, gt_center_depth)
         return losses
 
-    def loss_depth_map_metric(self, outputs, targets, indices, num_boxes):
-        if "pred_depth_map" not in outputs:
-            raise KeyError("No predicted depth found in outputs")
-        idx = self._get_source_permutation_idx(indices)
-        source_depths_map = outputs['pred_depth_map'][idx].squeeze()
-        target_depths = torch.cat([t['depth'][i] for t, (_, i) in zip(targets, indices)], dim=0).squeeze()
-        
-        losses = {}
-        loss_depth_map = F.l1_loss(source_depths_map, target_depths, reduction='none')
-        losses['loss_depth_map'] = torch.log10(loss_depth_map.sum() / num_boxes + 1)
-        return losses
+    def loss_region(self, outputs, targets, indices, num_boxes):
+        region_probs = outputs['pred_region_prob']
+        gt_region = torch.cat([t['obj_region'].unsqueeze(0) for t in targets], dim=0)
 
-    def loss_depth_map_weight(self, outputs, targets, indices, num_boxes):
-        """
-        Comput the losses related to the depth map learned weight, the L1 loss.
-        
-        Targets dicts must contain the key "boxes_3d" containing a tensor of dim [nb_target_boxes, 6] and "depth" containing a tensor of dim [nb_target_boxes, 1]. The target boxes are expected in format (cx, cy, l, r, t, b), normalized by the image size.
-        """
-        depth_map = outputs['pred_depth_map']
-        
-        idx = self._get_source_permutation_idx(indices)
-        source_center3d = outputs['pred_boxes'][..., :2][idx]
-        source_center3d = ((source_center3d - 0.5) * 2).clone().detach()
-        source_depth_weights = outputs['pred_depth_weights'][idx]
-        target_depths = torch.cat([t['depth'][i] for t, (_, i) in zip(targets, indices)], dim=0).squeeze()
-        
-        depth_map_weight_loss = 0.
-        for b, s_idx in enumerate(idx[0].unique()):
-            b_mask = idx[0] == s_idx
-            b_center3d = source_center3d[b_mask]
-            b_depth_map = depth_map[s_idx].unsqueeze(0)
-            b_source_depths = F.grid_sample(
-                b_depth_map.unsqueeze(1),
-                b_center3d.unsqueeze(0).unsqueeze(2),
-                mode='bilinear',
-                align_corners=True
-            ).squeeze()
-            
-            b_source_depths = b_source_depths.unsqueeze(0) if b_source_depths.dim() == 0 else b_source_depths
-            b_target_depths = target_depths[b_mask]
-            b_depth_map_scale, b_depth_map_shift = source_depth_weights[b_mask].split([1, 1], dim=-1)
-            b_depth_map_weight = b_source_depths * b_depth_map_scale.squeeze() + b_depth_map_shift.squeeze()
-            depth_map_weight_loss += F.l1_loss(b_depth_map_weight, b_target_depths, reduction='sum')
-        losses = {}
-        losses['loss_depth_map_weight'] = depth_map_weight_loss / num_boxes
-        return losses
+        loss = 0
+        losses = dict()
+        for region_prob in region_probs:
+            gt_region_resized = F.interpolate(gt_region.unsqueeze(1).float(), size=region_prob.shape[2:], mode='bilinear', align_corners=True)
+            # Compute intersection and union
+            intersection = (region_prob * gt_region_resized).sum()
+            total = region_prob.sum() + gt_region_resized.sum()
+            # Compute Dice Coefficient
+            dice_coef = (2. * intersection + 1) / (total + 1)
+            # Compute Dice Loss
+            dice_loss = 1 - dice_coef
+            loss += dice_loss
 
-    def loss_affine_invariant_depth(self, outputs, targets, indices, num_boxes):
-        """
-        Compute the losses related to the affine invariant depth, the L1 regression loss.
-        
-        Targets dicts must contain the key "boxes_3d" containing a tensor of dim [nb_target_boxes, 6] and "depth" containing a tensor of dim [nb_target_boxes, 1]. The target boxes are expected in format (cx, cy, l, r, t, b), normalized by the image size.
-        """
-        depth_map = outputs['pred_depth_map']
-        
-        idx = self._get_source_permutation_idx(indices)
-        source_center3d = outputs['pred_boxes'][..., :2][idx]
-        source_center3d = ((source_center3d - 0.5) * 2).clone().detach()
-        source_depths = outputs['pred_depth'][idx][:, 0]
-        target_depths = torch.cat([t['depth'][i] for t, (_, i) in zip(targets, indices)], dim=0).squeeze()
+        losses['loss_region'] = loss
 
-        affine_invariant_depth_loss = 0
-        # In every batch (image), the ratio of the relative depth from depth map to the target depth should be the same.
-        for b, s_idx in enumerate(idx[0].unique()):
-            b_mask = idx[0] == s_idx
-            b_center3d = source_center3d[b_mask]
-            b_depth_map = depth_map[s_idx].unsqueeze(0)
-            b_map_depths = F.grid_sample(
-                b_depth_map.unsqueeze(1),
-                b_center3d.unsqueeze(0).unsqueeze(2),
-                mode='bilinear',
-                align_corners=True
-            ).squeeze()
-            
-            b_map_depths = b_map_depths.unsqueeze(0) if b_map_depths.dim() == 0 else b_map_depths
-            b_target_depths = target_depths[b_mask]
-            b_source_depths = source_depths[b_mask]
-            b_mt_ratio_depths = b_map_depths / b_target_depths
-            b_ms_ratio_depths = b_map_depths / b_source_depths
-            b_affine_invariant_depth_loss = torch.triu(b_ms_ratio_depths - b_ms_ratio_depths[:, None]).abs().mean() + (b_mt_ratio_depths - b_ms_ratio_depths).abs().sum()
-            affine_invariant_depth_loss += b_affine_invariant_depth_loss
-        
-        losses = {}
-        losses['loss_affine_invariant_depth'] = affine_invariant_depth_loss / num_boxes
         return losses
 
     def _get_source_permutation_idx(self, indices):
@@ -1892,8 +1761,8 @@ uncertainty loss.
             'dims': self.loss_dims,
             'angles': self.loss_angles,
             'center': self.loss_3dcenter,
-            # 'depth_map': self.loss_depth_map,
-            'depth_map': self.loss_depth_map_metric,
+            'depth_map': self.loss_depth_map,
+            'region': self.loss_region,
         }
         if loss not in loss_map:
             raise ValueError(f"Loss {loss} not supported")
@@ -1935,7 +1804,7 @@ uncertainty loss.
             for i, auxiliary_outputs in enumerate(outputs["auxiliary_outputs"]):
                 indices = self.matcher(auxiliary_outputs, targets, group_num=group_num)
                 for loss in self.losses:
-                    if loss == 'depth_map':
+                    if loss == 'depth_map' or loss == 'region':
                         # Intermediate masks losses are too costly to compute, we ignore them.
                         continue
                     l_dict = self.get_loss(loss, auxiliary_outputs, targets, indices, num_boxes)

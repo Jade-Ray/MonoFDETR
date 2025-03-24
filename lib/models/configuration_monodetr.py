@@ -179,6 +179,7 @@ uncertainty loss in the object detection loss.
         angle_loss_coefficient=1,
         depth_loss_coefficient=1,
         depth_map_loss_coefficient=1,
+        region_loss_coefficient=1,
         focal_alpha=0.25,
         disable_custom_kernels=False,
         **kwargs,
@@ -246,6 +247,7 @@ uncertainty loss in the object detection loss.
         self.angle_loss_coefficient = angle_loss_coefficient
         self.depth_loss_coefficient = depth_loss_coefficient
         self.depth_map_loss_coefficient = depth_map_loss_coefficient
+        self.region_loss_coefficient = region_loss_coefficient
         self.focal_alpha = focal_alpha
         self.disable_custom_kernels = disable_custom_kernels
         if 'is_encoder_decoder' not in kwargs:

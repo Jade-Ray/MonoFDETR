@@ -502,7 +502,7 @@ class MonoDETRImageProcessor(BaseImageProcessor):
         """
         labels_list = []
         mask = batch["targets"]["mask_2d"]
-        key_list = ['labels', 'boxes', 'depth', 'size_3d', 'heading_bin', 'heading_res', 'boxes_3d', 'boxes_2d_h']
+        key_list = ['labels', 'boxes', 'depth', 'size_3d', 'heading_bin', 'heading_res', 'boxes_3d', 'obj_region']
         for bz in range(mask.shape[0]):
             labels_dict = {}
             for key, val in batch["targets"].items():
