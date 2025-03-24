@@ -171,6 +171,7 @@ wandb/
 
 # Data dir
 Mono3DRefer
+data
 data/
 cache/
 pretrained-models
