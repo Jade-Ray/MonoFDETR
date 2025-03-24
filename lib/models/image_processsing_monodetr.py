@@ -508,6 +508,8 @@ class MonoDETRImageProcessor(BaseImageProcessor):
             for key, val in batch["targets"].items():
                 if key in key_list:
                     labels_dict[key] = val[bz][mask[bz]]
+                if key == 'obj_region':
+                    labels_dict[key] = val[bz]
             labels_list.append(labels_dict)
 
         output = {
