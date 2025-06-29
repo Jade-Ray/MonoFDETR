@@ -106,7 +106,7 @@ def get_polygon_pts(corners_3d):
     return [rb, bottom, lb, lt, top, rt]
 
 
-def draw_projected_box3d(image, corners3d, color=(255, 255, 255), thickness=1, fill=False):
+def draw_projected_box3d(image, corners3d, color=(255, 255, 255), thickness=1, fill=False, alpha=0.3):
     ''' Draw 3d bounding box in image
     input:
         image: RGB image
@@ -132,7 +132,7 @@ def draw_projected_box3d(image, corners3d, color=(255, 255, 255), thickness=1, f
     
     if fill:
         overlay = image.copy()
-        alpha = 0.3
+        alpha = alpha if 0 < alpha < 1 else 0.3
         idx = get_polygon_pts(corners3d)
         pts = corners3d[idx].reshape(1, -1, 2)
         cv.fillPoly(overlay, pts, color)
@@ -173,7 +173,7 @@ class ImageFormat(ExplicitEnum):
     PIL = "pil_image"
 
 
-class Mono3DVGPlotter:
+class MonoDETRPlotter:
     
     _image_mean = IMAGENET_DEFAULT_MEAN
     _image_std = IMAGENET_DEFAULT_STD
@@ -300,6 +300,7 @@ class Mono3DVGPlotter:
         random_color: bool = False,
         thickness: int = 2,
         fill: bool = False,
+        fill_alpha: float = 0.3,
         format: str = ImageFormat.PIL,
     ) -> Union[np.ndarray, PIL.Image.Image]:
         """
@@ -326,7 +327,7 @@ class Mono3DVGPlotter:
                 continue
             if random_color:
                 color = cls._rcg(i)
-            draw_projected_box3d(image, box3d, color, thickness, fill=fill)
+            draw_projected_box3d(image, box3d, color, thickness, fill=fill, alpha=fill_alpha)
         
         if format == ImageFormat.PIL:
             image = convert_mat2pil(image)

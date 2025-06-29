@@ -346,6 +346,61 @@ class Calibration(object):
         self.tx = self.P2[0, 3] / (-self.fu)
         self.ty = self.P2[1, 3] / (-self.fv)
 
+
+class CalibrationP2(object):
+    
+    def __init__(self, calib: dict):
+        """
+        :param calib: {'P2': np.array(3, 4)}
+        """
+        self.P2 = calib['P2']
+        
+        # Camera intrinsics and extrinsics
+        self.cu = self.P2[0, 2]
+        self.cv = self.P2[1, 2]
+        self.fu = self.P2[0, 0]
+        self.fv = self.P2[1, 1]
+        self.tx = self.P2[0, 3] / (-self.fu)
+        self.ty = self.P2[1, 3] / (-self.fv)
+        
+    @classmethod
+    def get_calib_from_P2(cls, P2):
+        return cls({'P2': P2})
+    
+    @classmethod
+    def cart_to_hom(cls, pts):
+        """
+        :param pts: (N, 3 or 2)
+        :return pts_hom: (N, 4 or 3)
+        """
+        pts_hom = np.hstack((pts, np.ones((pts.shape[0], 1), dtype=np.float32)))
+        return pts_hom
+
+    def rect_to_img(self, pts_rect):
+        """
+        :param pts_rect: (N, 3)
+        :return pts_img: (N, 2)
+        """
+        pts_rect_hom = self.cart_to_hom(pts_rect)
+        pts_2d_hom = np.dot(pts_rect_hom, self.P2.T)
+        pts_img = (pts_2d_hom[:, 0:2].T / pts_rect_hom[:, 2]).T  # (N, 2)
+        pts_rect_depth = pts_2d_hom[:, 2] - self.P2.T[3, 2]  # depth in rect camera coord
+        return pts_img, pts_rect_depth
+    
+    @classmethod
+    def rect_to_img_with_P2(cls, pts_rect, P2):
+        """
+        :param pts_rect: (N, 3)
+        :param P2: camera projection matrix (3, 4)
+        :return pts_img: (N, 2)
+        """
+        pts_rect_hom = cls.cart_to_hom(pts_rect)
+        pts_2d_hom = np.dot(pts_rect_hom, P2.T)
+        pts_img = (pts_2d_hom[:, 0:2].T / pts_rect_hom[:, 2]).T  # (N, 2)
+        pts_rect_depth = pts_2d_hom[:, 2] - P2.T[3, 2]  # depth in rect camera coord
+        return pts_img, pts_rect_depth
+
+
 ###################  affine trainsform  ###################
 
 def get_dir(src_point, rot_rad):

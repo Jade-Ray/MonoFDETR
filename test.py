@@ -13,7 +13,7 @@ from lib.helpers.accelerator_helper import build_accelerator, init_accelerator, 
 from lib.helpers.checkpoint_helper import CustomCheckpoint, get_resume_chekpoint_path
 from lib.helpers.metric_helper import nested_to_cpu
 from lib.models.configuration_monodetr import MonoDETRConfig
-from lib.models.monodetr import MonoDETRForMultiObjectDetection as MonoDETR
+from lib.models.monofdetr import MonoFDETRForMultiObjectDetection as MonoDETR
 from lib.models.image_processsing_monodetr import MonoDETRImageProcessor
 
 
@@ -133,6 +133,13 @@ def main():
         )
         
         logger.info(metrics)
+    
+    # Save the model
+    accelerator.wait_for_everyone()
+    unwrapped_model = accelerator.unwrap_model(model)
+    unwrapped_model.save_pretrained(cfg.output_dir, is_main_process=accelerator.is_main_process, save_function=accelerator.save, safe_serialization=False)
+    if accelerator.is_main_process:
+        image_processor.save_pretrained(cfg.output_dir)
 
 
 if __name__ == '__main__':

@@ -15,7 +15,7 @@ from lib.helpers.checkpoint_helper import CustomCheckpoint, get_resume_chekpoint
 from lib.helpers.metric_helper import nested_to_cpu
 from lib.helpers.huggingface_hub_helper import create_huggingface_hub_repo, upload_output_folder
 from lib.models.configuration_monodetr import MonoDETRConfig
-from lib.models.monodetr import MonoDETRForMultiObjectDetection as MonoDETR
+from lib.models.monofdetr import MonoFDETRForMultiObjectDetection as MonoDETR
 from lib.models.image_processsing_monodetr import MonoDETRImageProcessor
 
 

@@ -471,8 +471,57 @@ class MonoDETRImageProcessor(BaseImageProcessor):
                     "boxes_3d": boxes_3d[i, j],
                     "angle": angle[i, j],
                     "rotation_y": rotation_y[i, j],
+                    "query_index": topk_boxes[i, j, 0].item(),  # query index
                 })
             results[id] = preds
+        return results
+    
+    def post_process_targets(self, targets: List[Dict], calibs: TensorType, target_sizes: Union[TensorType, List[Tuple]] = None,):
+        if target_sizes is not None:
+            if len(targets) != len(target_sizes):
+                raise ValueError(
+                    "Make sure that you pass in as many target sizes as the batch dimension of the targets"
+                )
+        
+        results = []
+        for target, calib, size in zip(targets, calibs, target_sizes):
+            if len(target['labels']) == 0:
+                results.append(target)
+            else:
+                scale_fct = torch.cat([size, size], dim=0) # (width, height, width, height)
+                size_3d = target['size_3d'] # (N, 3) => (h, w, l)
+                boxes = target['boxes_3d'] # (N, 6) => (cx, cy, l, r, t, b)
+                boxes_2d = box_cxcylrtb_to_xyxy(target['boxes_3d']) * scale_fct[None, :]  # (N, 4)
+                cx_2d = box_xyxy_to_cxcywh(boxes_2d)[..., 0]  # (N,)
+                cx_3d = (boxes[..., 0] * size[0])[:, None]  # (N, 1)
+                cy_3d = (boxes[..., 1] * size[1])[:, None]  # (N, 1)
+                depth_rect = target['depth'] # (N, 1)
+                
+                cu, fu = calib[0, 2], calib[0, 0]  # (1,)
+                tx = calib[0, 3] / -fu
+                cv, fv = calib[1, 2], calib[1, 1]
+                ty = calib[1, 3] / -fv
+                rect_x = (cx_3d - cu) * depth_rect / fu + tx
+                rect_y = (cy_3d - cv) * depth_rect / fv + ty
+                rect_z = depth_rect
+                pos_rect = torch.cat([rect_x, rect_y, rect_z], dim=1) # (N, 3)
+                pos_rect[:, 1] += size_3d[:, 0] / 2  # (x, y, z) -> (x, y + h/2, z)
+                boxes_3d = torch.cat([size_3d, pos_rect], dim=1)  # (N, 6) => (h, w, l, x, y, z)
+                
+                angle = target['heading_bin'] * (2 * torch.pi / 12) + target['heading_res']  # (N,)
+                angle = torch.where(angle > torch.pi, angle - 2 * torch.pi, angle).squeeze()
+                rotation_y = angle + torch.arctan2(cx_2d - cu, fu)
+                rotation_y = torch.where(rotation_y > torch.pi, rotation_y - 2 * torch.pi, rotation_y)
+                rotation_y = torch.where(rotation_y < -torch.pi, rotation_y + 2 * torch.pi, rotation_y)
+
+                results.append({
+                    "labels": target['labels'],
+                    "boxes_2d": boxes_2d,
+                    "boxes_3d": boxes_3d,
+                    "angle": angle,
+                    "rotation_y": rotation_y,
+                    "obj_region": target['obj_region'],
+                })
         return results
     
     @classmethod
